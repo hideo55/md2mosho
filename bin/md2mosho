@@ -1,0 +1,958 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use Cwd;
+use Getopt::Long;
+use Data::Section::Simple qw( get_data_section );
+use File::Path qw( make_path );
+use File::Spec;
+use Path::Class;
+use Text::Markdown qw( markdown );
+use Text::Xslate qw( mark_raw );
+
+our $VERSION = "0.01";
+
+my %opts = (
+    width      => 1200,
+    height     => 800,
+    max_column => 5,
+    outputdir  => getcwd(),
+);
+
+GetOptions(
+    'width=i'     => \$opts{width},
+    'height=i'    => \$opts{height},
+    'column=i'    => \$opts{max_column},
+    'outputdir=s' => \$opts{outputdir},
+);
+
+my $mdfile = $ARGV[0] or die "You must pass markdown file path.";
+
+my $SectionRe
+    = qr{(.+[ \t]*\n[-=]+[ \t]*\n*(?:(?!.+[ \t]*\n[-=]+[ \t]*\n*)(?:.|\n))*)};
+
+$opts{outputdir} = File::Spec->canonpath( $opts{outputdir} );
+output_static_files( $opts{outputdir} );
+
+my $outputfile = 'index.html';
+$outputfile = File::Spec->catfile( $opts{outputdir}, $outputfile );
+
+my ( $title, $content ) = parse_markdown( join '', file($mdfile)->slurp );
+
+my $index_html = get_data_section('index.html');
+my $tx         = Text::Xslate->new;
+my $output     = $tx->render_string( $index_html,
+    { content => mark_raw($content), title => $title } );
+my $outputfile_fh = file($outputfile)->open('w') or die $!;
+print $outputfile_fh $output;
+close $outputfile_fh;
+
+sub parse_markdown {
+    my $md = shift;
+    my $title;
+    my $content;
+    my @sections;
+    while ( $md =~ /$SectionRe/g ) {
+        push @sections, $1;
+    }
+    my $x              = 0;
+    my $y              = 0;
+    my $current_column = 0;
+    for my $section (@sections) {
+        my %attrs;
+        $attrs{class} = 'mosho-slide';    # default
+        while ( $section =~ /^<!\-{2,}\s*([^\s]+)\s*\-{2,}>/gm ) {
+            my $attr = $1;
+            if ( $attr =~ /(.+)="?([^"]+)?"?/ ) {
+                $attrs{$1} = $attrs{$1} ? [ $attrs{$1}, $2 ] : $2;
+            }
+        }
+        if ( !defined $attrs{id} && $x == 0 && $y == 0 ) {
+            $attrs{id} = 'title';         # for first presentation
+            if ( $section =~ /(.+)[ \t]*\n[-=]{3,}[ \t]*\n*/ ) {
+                $title = $1;
+            }
+
+        }
+        unless ( defined $attrs{'data-x'} ) {
+            $attrs{'data-x'} = $x;
+            $x += $opts{width};
+        }
+        unless ( defined $attrs{'data-y'} ) {
+            $attrs{'data-y'} = $y;
+            $current_column++;
+            if ( $current_column >= $opts{max_column} ) {
+                $x = 0;
+                $y += $opts{height};
+                $current_column = 0;
+            }
+        }
+        my $attrs = join ' ', map {
+            if ( ref $attrs{$_} eq 'ARRAY' )
+            {
+                sprintf '%s="%s"', $_, join ' ', @{ $attrs{$_} };
+            }
+            else {
+                sprintf '%s="%s"', $_, $attrs{$_};
+            }
+        } keys %attrs;
+        $content .= sprintf <<'HTML', $attrs, markdown($section);
+<div %s>
+%s
+</div>
+HTML
+        $content =~ s/<p><code>/<p><pre class="prettyprint">/g;
+        $content =~ s{</code></p>}{</pre></p>}g;
+    }
+    return ( $title, $content );
+}
+
+sub output_static_files {
+    my $dir            = shift;
+    my $mosho_js       = get_data_section('mosho.js');
+    my $mosho_demo_css = get_data_section('mosho.css');
+
+    my $jsdir = File::Spec->catfile( $dir, 'js' );
+    unless ( -d $jsdir ) {
+        make_path($jsdir);
+    }
+
+    my $cssdir = File::Spec->catfile( $dir, 'css' );
+    unless ( -d $cssdir ) {
+        make_path($cssdir);
+    }
+
+    my $jsfile = file( File::Spec->catfile( $jsdir, 'mosho.js' ) );
+    unless ( -f $jsfile ) {
+        my $jsfh = $jsfile->openw;
+        print $jsfh $mosho_js;
+        $jsfh->close;
+    }
+
+    my $cssfile = file( File::Spec->catfile( $cssdir, 'mosho.css' ) );
+    unless ( -f $cssfile ) {
+        my $cssfh = $cssfile->openw;
+        print $cssfh $mosho_demo_css;
+        $cssfh->close;
+    }
+}
+
+__DATA__
+
+@@ index.html
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title><: $title :></title>
+    <link href="http://fonts.googleapis.com/css?family=Open+Sans:regular,semibold,italic,italicsemibold|PT+Sans:400,700,400italic,700italic|PT+Serif:400,700,400italic,700italic" rel="stylesheet" />
+    <link href="css/mosho.css" rel="stylesheet" />
+    <script type="text/javascript" src="http://google-code-prettify.googlecode.com/svn/trunk/src/prettify.js"></script>
+</head>
+<body>
+<div id="mosho">
+<: $content :>
+</div>
+<script src="js/mosho.js"></script>
+<script type="text/javascript">
+mosho.plugin({
+  name: "scaleActiveSlide",
+  preShow: function (evt) {
+    prv = evt.detail.prevSlide;
+    nxt = evt.detail.nextSlide;
+    if (prv) { prv.scale(0.25) }
+    if (nxt) { nxt.scale(4) }
+  }
+});
+mosho.init();
+
+try{
+  window.addEventListener("load",prettyPrint,false);
+}catch(e){
+  window.attachEvent("onload",prettyPrint);
+}
+</script>
+</body>
+</html>
+
+@@ mosho.js
+(function() {
+  'use strict';
+
+  var Camera, SceneElement, Slide, SlideGroup, addDocListener, addWinListener, attachPlugin, camera, css, defTransform, fireDocEvent, init, initListeners, initialized, memoize1, mosho, onEnterSlide, onLeaveSlide, perspective, pfx, root, transform3d, transformData, unHash, updateWinHash,
+    __hasProp = {}.hasOwnProperty,
+    __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; };
+
+  memoize1 = function(fn) {
+    var m;
+    m = {};
+    return function(a) {
+      if (m[a] == null) {
+        m[a] = fn(a);
+      }
+      return m[a];
+    };
+  };
+
+  updateWinHash = function(tag) {
+    var hash;
+    hash = "#" + tag;
+    if (window.location.hash !== hash) {
+      window.location.hash = hash;
+    }
+    window.scrollTo(0, 0);
+    setTimeout((function() {
+      return window.scrollTo(0, 0);
+    }), 0);
+  };
+
+  addWinListener = function(evt, cb) {
+    window.addEventListener(evt, cb);
+  };
+
+  addDocListener = function(evt, cb) {
+    document.addEventListener(evt, cb);
+  };
+
+  fireDocEvent = function(evtName, detail) {
+    var evt;
+    if (detail == null) {
+      detail = {};
+    }
+    evt = document.createEvent('CustomEvent');
+    evt.initCustomEvent(evtName, true, true, detail);
+    document.dispatchEvent(evt);
+  };
+
+  unHash = function(str) {
+    return str.replace(/^\#/, '');
+  };
+
+  pfx = (function() {
+    var pres, style;
+    style = document.createElement("dummy").style;
+    pres = ["Webkit", "Moz", "O", "ms", "Khtml"];
+    return memoize1(function(prop) {
+      var props, uc, _i, _len;
+      uc = prop.charAt(0).toUpperCase() + prop.slice(1);
+      props = [prop].concat(pres.map(function(pre) {
+        return "" + pre + uc;
+      }));
+      for (_i = 0, _len = props.length; _i < _len; _i++) {
+        prop = props[_i];
+        if (style[prop] != null) {
+          return prop;
+        }
+      }
+    });
+  })();
+
+  css = function(el, props) {
+    var key, pkey;
+    if (props == null) {
+      props = [];
+    }
+    for (key in props) {
+      if (!(props.hasOwnProperty(key))) {
+        continue;
+      }
+      pkey = pfx(key);
+      el.style[pkey] = props[key];
+    }
+    return el;
+  };
+
+  perspective = function(p) {
+    return " perspective(" + p + "px) ";
+  };
+
+  defTransform = {
+    scale: 1,
+    translate: {
+      x: 0,
+      y: 0,
+      z: 0
+    },
+    rotate: {
+      x: 0,
+      y: 0,
+      z: 0
+    }
+  };
+
+  transform3d = function(_arg, rev) {
+    var r, s, t;
+    t = _arg.translate, r = _arg.rotate, s = _arg.scale;
+    if (rev == null) {
+      rev = false;
+    }
+    if (rev) {
+      return ("scale(" + (1 / s) + ")") + (" rotateZ(" + (-r.z) + "deg) rotateY(" + (-r.y) + "deg) rotateX(" + (-r.x) + "deg)") + (" translate3d(" + (-t.x) + "px," + (-t.y) + "px," + (-t.z) + "px)");
+    } else {
+      return ("translate3d(" + t.x + "px," + t.y + "px," + t.z + "px)") + (" rotateX(" + r.x + "deg) rotateY(" + r.y + "deg) rotateZ(" + r.z + "deg)") + (" scale(" + s + ")");
+    }
+  };
+
+  transformData = function(data, def) {
+    var transform;
+    if (def == null) {
+      def = defTransform;
+    }
+    transform = {
+      scale: Number(data.scale || 1) * def.scale,
+      translate: {
+        x: Number(data.x || 0) + def.translate.x,
+        y: Number(data.y || 0) + def.translate.y,
+        z: Number(data.z || 0) + def.translate.z
+      },
+      rotate: {
+        x: Number(data.rotx || 0) + def.rotate.x,
+        y: Number(data.roty || 0) + def.rotate.y,
+        z: Number(data.rotz || 0) + def.rotate.z
+      }
+    };
+    return transform;
+  };
+
+  initialized = false;
+
+  root = null;
+
+  camera = null;
+
+  SceneElement = (function() {
+    var byId, byOrder, n;
+
+    n = 0;
+
+    byId = {};
+
+    byOrder = [];
+
+    function SceneElement(el, parent) {
+      this.el = el;
+      this.parent = parent != null ? parent : null;
+      this.data = this.el.dataset;
+      this.transform = transformData(this.data);
+      if (!this.el.id) {
+        this.el.id = "mosho-element-" + n;
+      }
+      this.id = this.el.id;
+      css(this.el, {
+        position: 'absolute',
+        display: 'block',
+        transformStyle: 'preserve-3d'
+      });
+      this.updateCss();
+      this.order = n++;
+      byId[this.id] = this;
+      byOrder.push(this);
+      return;
+    }
+
+    SceneElement.prototype.show = function(t) {
+      var e;
+      if (t == null) {
+        t = null;
+      }
+      if (typeof t === 'string' && ((e = this.getById(t)) != null)) {
+        return e.show();
+      } else {
+        return false;
+      }
+    };
+
+    SceneElement.prototype.getById = function(id) {
+      return byId[id];
+    };
+
+    SceneElement.prototype.getByOrder = function(n, offset) {
+      var max;
+      if (offset == null) {
+        offset = false;
+      }
+      max = byOrder.length - 1;
+      if (offset) {
+        n += this.order;
+      }
+      while (n > max) {
+        n -= byOrder.length;
+      }
+      while (n < 0) {
+        n += byOrder.length;
+      }
+      return byOrder[n];
+    };
+
+    SceneElement.prototype.getTransformList = function() {
+      var transforms, _ref;
+      transforms = [this.transform].concat(((_ref = this.parent) != null ? _ref.getTransformList() : void 0) || []);
+      return transforms;
+    };
+
+    SceneElement.prototype.buildTotalTransform = function() {
+      var t, transform, transforms;
+      transforms = this.getTransformList();
+      transform = {
+        scale: 1,
+        translate: {
+          x: 0,
+          y: 0,
+          z: 0
+        },
+        rotate: {
+          x: 0,
+          y: 0,
+          z: 0
+        }
+      };
+      while ((t = transforms.shift()) != null) {
+        transform.scale *= t.scale;
+        transform.translate.x += t.translate.x;
+        transform.translate.y += t.translate.y;
+        transform.translate.z += t.translate.z;
+        transform.rotate.x += t.rotate.x;
+        transform.rotate.y += t.rotate.y;
+        transform.rotate.z += t.rotate.z;
+      }
+      return transform;
+    };
+
+    SceneElement.prototype.buildCssTransform = function(camera) {
+      if (camera == null) {
+        camera = false;
+      }
+      return transform3d(this.buildTotalTransform(), camera);
+    };
+
+    SceneElement.prototype.updateCss = function() {
+      return css(this.el, {
+        transform: this.buildCssTransform()
+      });
+    };
+
+    SceneElement.prototype.translate = function(x, y, z, abs) {
+      if (x == null) {
+        x = 0;
+      }
+      if (y == null) {
+        y = 0;
+      }
+      if (z == null) {
+        z = 0;
+      }
+      if (abs == null) {
+        abs = false;
+      }
+      if (abs) {
+        this.transform.translate = {
+          x: x,
+          y: y,
+          z: z
+        };
+      } else {
+        this.transform.translate.x += x;
+        this.transform.translate.y += y;
+        this.transform.translate.z += z;
+      }
+      this.updateCss();
+    };
+
+    SceneElement.prototype.rotate = function(x, y, z, abs) {
+      if (abs == null) {
+        abs = false;
+      }
+      if (abs) {
+        this.transform.rotate = {
+          x: x,
+          y: y,
+          z: z
+        };
+      } else {
+        this.transform.rotate.x += x;
+        this.transform.rotate.y += y;
+        this.transform.rotate.z += z;
+      }
+      this.updateCss();
+    };
+
+    SceneElement.prototype.scale = function(s, abs) {
+      if (s == null) {
+        s = 1;
+      }
+      if (abs == null) {
+        abs = false;
+      }
+      if (abs) {
+        this.transform.scale = s;
+      } else {
+        this.transform.scale *= s;
+      }
+      this.updateCss();
+    };
+
+    return SceneElement;
+
+  })();
+
+  SlideGroup = (function(_super) {
+
+    __extends(SlideGroup, _super);
+
+    function SlideGroup(el, parent) {
+      var me;
+      this.el = el;
+      this.parent = parent != null ? parent : null;
+      SlideGroup.__super__.constructor.call(this, this.el, this.parent);
+      me = this;
+      this.children = (function() {
+        var _i, _len, _ref, _ref1, _ref2, _results;
+        _ref = this.el.childNodes;
+        _results = [];
+        for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+          el = _ref[_i];
+          if (el != null ? (_ref1 = el.classList) != null ? _ref1.contains('mosho-slide') : void 0 : void 0) {
+            _results.push(new Slide(el, me));
+          } else if (el != null ? (_ref2 = el.classList) != null ? _ref2.contains('mosho-group') : void 0 : void 0) {
+            _results.push(new SlideGroup(el, me));
+          } else {
+            _results.push(void 0);
+          }
+        }
+        return _results;
+      }).call(this);
+    }
+
+    SlideGroup.prototype.updateCss = function() {};
+
+    SlideGroup.prototype.show = function(t) {
+      if (SlideGroup.__super__.show.call(this, t)) {
+        return true;
+      }
+      return this.getByOrder(1, true).show();
+    };
+
+    return SlideGroup;
+
+  })(SceneElement);
+
+  Camera = (function(_super) {
+
+    __extends(Camera, _super);
+
+    function Camera(el) {
+      this.el = el;
+      Camera.__super__.constructor.call(this, this.el, null);
+      css(this.el, {
+        position: 'absolute',
+        transformOrigin: "0% 0%",
+        transformStyle: "preserve-3d"
+      });
+    }
+
+    Camera.prototype.updateCss = function() {};
+
+    return Camera;
+
+  })(SlideGroup);
+
+  Slide = (function(_super) {
+    var active, n, slides;
+
+    __extends(Slide, _super);
+
+    active = null;
+
+    slides = [];
+
+    n = 0;
+
+    function Slide(el, parent) {
+      this.el = el;
+      this.parent = parent != null ? parent : null;
+      this.el.classList.add('mosho-inactive');
+      this.slidesOrder = n++;
+      slides.push(this);
+      Slide.__super__.constructor.call(this, this.el, this.parent);
+      this.updateCss();
+    }
+
+    Slide.prototype.show = function(t) {
+      var prevSlide;
+      if (Slide.__super__.show.call(this, t)) {
+        return true;
+      }
+      if (this === this.getActiveSlide()) {
+        return true;
+      }
+      prevSlide = this.getActiveSlide();
+      fireDocEvent("mosho:enter:" + this.id);
+      if (prevSlide != null) {
+        fireDocEvent("mosho:leave:" + prevSlide.id);
+      }
+      fireDocEvent("mosho:pre-show", {
+        prevSlide: prevSlide,
+        nextSlide: this
+      });
+      active = this;
+      updateWinHash(this.id);
+      if (prevSlide != null) {
+        prevSlide.el.classList.remove('mosho-active');
+      }
+      if (prevSlide != null) {
+        prevSlide.el.classList.add('mosho-inactive');
+      }
+      this.el.classList.remove('mosho-inactive');
+      this.el.classList.add('mosho-active');
+      css(camera.el, {
+        transform: this.buildCssTransform(true),
+        transition: "all " + (this.data.transition || "1s ease")
+      });
+      fireDocEvent("mosho:post-show", {
+        prevSlide: prevSlide,
+        nextSlide: this
+      });
+      return true;
+    };
+
+    Slide.prototype.getActiveSlide = function() {
+      return active;
+    };
+
+    Slide.prototype.getPrevSlide = function() {
+      if (this.data.prev != null) {
+        return this.getById(this.data.prev);
+      } else {
+        return slides[this.slidesOrder === 0 ? slides.length - 1 : this.slidesOrder - 1];
+      }
+    };
+
+    Slide.prototype.getNextSlide = function() {
+      if (this.data.next != null) {
+        return this.getById(this.data.next);
+      } else {
+        return slides[this.slidesOrder === slides.length - 1 ? 0 : this.slidesOrder + 1];
+      }
+    };
+
+    Slide.prototype.updateCss = function() {
+      return css(this.el, {
+        transform: 'translate(-50%,-50%) ' + this.buildCssTransform()
+      });
+    };
+
+    return Slide;
+
+  })(SceneElement);
+
+  init = function() {
+    if (initialized) {
+      return;
+    }
+    fireDocEvent("mosho:pre-init");
+    root = document.createElement('div');
+    root.id = 'mosho-container';
+    css(document.body, {
+      height: '100%',
+      overflow: 'hidden'
+    });
+    css(root, {
+      position: "absolute",
+      transformOrigin: "0% 0%",
+      transition: "all 0s ease-in-out",
+      top: "50%",
+      left: "50%",
+      transform: perspective(4000),
+      transformStyle: "preserve-3d"
+    });
+    camera = document.getElementById('mosho');
+    camera.id = 'mosho-camera';
+    camera = new Camera(camera);
+    document.body.appendChild(root);
+    root.appendChild(camera.el);
+    if (!camera.show(unHash(window.location.hash))) {
+      camera.getByOrder(0).show();
+    }
+    initListeners();
+    initialized = true;
+    fireDocEvent("mosho:post-init");
+  };
+
+  initListeners = function() {
+    addWinListener('hashchange', function() {
+      return Slide.prototype.getById(unHash(window.location.hash)).show();
+    });
+    addDocListener('keydown', function(e) {
+      switch (e.keyCode) {
+        case 37:
+        case 38:
+        case 9:
+        case 32:
+        case 39:
+        case 40:
+          e.preventDefault();
+      }
+    });
+    addDocListener('keyup', function(e) {
+      switch (e.keyCode) {
+        case 37:
+        case 38:
+          mosho.prev();
+          return e.preventDefault();
+        case 9:
+        case 32:
+        case 39:
+        case 40:
+          mosho.next();
+          return e.preventDefault();
+      }
+    });
+  };
+
+  onEnterSlide = function(id, cb) {
+    addDocListener("mosho:enter:" + id, cb);
+  };
+
+  onLeaveSlide = function(id, cb) {
+    addDocListener("mosho:leave:" + id, cb);
+  };
+
+  attachPlugin = function(plug) {
+    var _ref;
+    if ((_ref = plug.name) == null) {
+      plug.name = "Anonymous Plugin";
+    }
+    if (initialized) {
+      console.warn("plugin '" + plug.name + "' attached after Mosho.init()");
+    }
+    if (typeof plug.preJump === 'function') {
+      addDocListener("mosho:pre-init", plug.preinit);
+    }
+    if (typeof plug.postInit === 'function') {
+      addDocListener("mosho:post-init", plug.postInit);
+    }
+    if (typeof plug.preShow === 'function') {
+      addDocListener("mosho:pre-show", plug.preShow);
+    }
+    if (typeof plug.postShow === 'function') {
+      addDocListener("mosho:post-show", plug.postShow);
+    }
+  };
+
+  mosho = window.mosho = {
+    init: init,
+    prev: function() {
+      return Slide.prototype.getActiveSlide().getPrevSlide().show();
+    },
+    next: function() {
+      return Slide.prototype.getActiveSlide().getNextSlide().show();
+    },
+    show: function(id) {
+      return SceneElement.prototype.getById(id).show();
+    },
+    getElement: function(id) {
+      if (id != null) {
+        return SceneElement.prototype.getById(id);
+      } else {
+        return Slide.prototype.getActiveSlide();
+      }
+    },
+    enter: onEnterSlide,
+    leave: onLeaveSlide,
+    plugin: attachPlugin
+  };
+
+}).call(this);
+
+@@ mosho.css
+
+/**
+ * This is a stylesheet for a demo presentation for mosho.js
+ * 
+ * It is not meant to be a part of mosho.js and is not required by mosho.js.
+ * I expect that anyone creating a presentation for mosho.js would create their own
+ * set of styles.
+ */
+
+
+/* http://meyerweb.com/eric/tools/css/reset/ 
+   v2.0 | 20110126
+   License: none (public domain)
+*/
+
+html, body, div, span, applet, object, iframe,
+h1, h2, h3, h4, h5, h6, p, blockquote, pre,
+a, abbr, acronym, address, big, cite, code,
+del, dfn, em, img, ins, kbd, q, s, samp,
+small, strike, strong, sub, sup, tt, var,
+b, u, i, center,
+dl, dt, dd, ol, ul, li,
+fieldset, form, label, legend,
+table, caption, tbody, tfoot, thead, tr, th, td,
+article, aside, canvas, details, embed,
+figure, figcaption, footer, header, hgroup,
+menu, nav, output, ruby, section, summary,
+time, mark, audio, video {
+margin: 0;
+padding: 0;
+border: 0;
+font-size: 100%;
+font: inherit;
+vertical-align: baseline;
+}
+
+body {
+  font-family: "Josefin Sans";
+  font-size: 32px;
+  line-height: 48px;
+  color: #fff;
+  height: 100%;
+  background: #000;
+  background: -webkit-radial-gradient(center, ellipse cover, #222 0%, #222 80%, #1a1a1a 100%);
+  background: -khtml-radial-gradient(center, ellipse cover, #222 0%, #222 80%, #1a1a1a 100%);
+  background: -moz-radial-gradient(center, ellipse cover, #222 0%, #222 80%, #1a1a1a 100%);
+  background: -ms-radial-gradient(center, ellipse cover, #222 0%, #222 80%, #1a1a1a 100%);
+  background: -o-radial-gradient(center, ellipse cover, #222 0%, #222 80%, #1a1a1a 100%);
+  background: radial-gradient(center, ellipse cover, #222 0%, #222 80%, #1a1a1a 100%);
+  background-attachment: fixed;
+}
+
+h1, h2, h3 {
+  font-family: "Actor";
+  font-weight: normal;
+}
+h1 { font-size: 96px; line-height: 128px; }
+h2 { font-size: 72px; line-height: 96px; }
+h3 { font-size: 64px; line-height: 72px; }
+
+aside {
+  font-size: 48px;
+}
+
+a {
+  display: inline-block;
+  padding: 6px;
+  -webkit-border-radius: 12px;
+  -khtml-border-radius: 12px;
+  -moz-border-radius: 12px;
+  -ms-border-radius: 12px;
+  -o-border-radius: 12px;
+  border-radius: 12px;
+  color: #acd;
+  background: rgba(0,0,0,0.15);
+  font-weight: bold;
+  text-decoration: none;
+  -webkit-transition: all 1s ease;
+  -khtml-transition: all 1s ease;
+  -moz-transition: all 1s ease;
+  -ms-transition: all 1s ease;
+  -o-transition: all 1s ease;
+  transition: all 1s ease;
+}
+a:hover {
+  background: rgba(0,0,0,0.25);
+}
+
+.mosho-slide {
+  width: 920px;
+  padding: 20px;
+  -webkit-border-radius: 16px;
+  -khtml-border-radius: 16px;
+  -moz-border-radius: 16px;
+  -ms-border-radius: 16px;
+  -o-border-radius: 16px;
+  border-radius: 16px;
+  text-align: center;
+  -webkit-text-shadow: 0 0 16px #fff; /* shadows to simulate blur, why not? */
+  -khtml-text-shadow: 0 0 16px #fff;
+  -moz-text-shadow: 0 0 16px #fff;
+  -ms-text-shadow: 0 0 16px #fff;
+  -o-text-shadow: 0 0 16px #fff;
+  text-shadow: 0 0 16px #fff;
+  color: rgba(255,255,255,0);
+  opacity: 0.2;
+  -webkit-transition: all 0.5s ease; /* ease into state changes */
+  -khtml-transition: all 0.5s ease;
+  -moz-transition: all 0.5s ease;
+  -ms-transition: all 0.5s ease;
+  -o-transition: all 0.5s ease;
+  transition: all 0.5s ease;
+}
+
+.mosho-slide.mosho-active {
+  -webkit-text-shadow: none;
+  -khtml-text-shadow: none;
+  -moz-text-shadow: none;
+  -ms-text-shadow: none;
+  -o-text-shadow: none;
+  text-shadow: none;
+  color: rgba(255,255,255,1);
+  opacity: 1.0;
+}
+
+.mosho-slide ul {
+    list-style: circle;
+    text-align: left;
+    width: 650px;
+    margin: 0 auto;
+    padding-left: 30px;
+}
+
+.mosho-slide ol {
+    list-style: decimal;
+    padding-left: 50px;
+}
+
+.mosho-slide li {
+		word-wrap: break-word;
+}
+
+.mosho-slide pre {
+		width: 600px;
+		text-align: left;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    background-color: #ffffff;
+    color: #000000;
+    padding: 5px;
+    border-radius: 10px;
+    margin: 15px auto;
+    line-height: 36px;
+}
+
+.mosho-slide p {
+    margin-bottom: 20px;
+}
+
+
+/* Pretty printing styles. Used with prettify.js. */
+
+.str { color: #080; }
+.kwd { color: #008; }
+.com { color: #800; }
+.typ { color: #606; }
+.lit { color: #066; }
+.pun { color: #660; }
+.pln { color: #000; }
+.tag { color: #008; }
+.atn { color: #606; }
+.atv { color: #080; }
+.dec { color: #606; }
+pre.prettyprint { padding: 2px; border: 1px solid #888; }
+
+@media print {
+  .str { color: #060; }
+  .kwd { color: #006; font-weight: bold; }
+  .com { color: #600; font-style: italic; }
+  .typ { color: #404; font-weight: bold; }
+  .lit { color: #044; }
+  .pun { color: #440; }
+  .pln { color: #000; }
+  .tag { color: #006; font-weight: bold; }
+  .atn { color: #404; }
+  .atv { color: #060; }
+}
+
+__END__
